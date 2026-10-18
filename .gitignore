@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.tgz
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*
+.pi/
+sessions/
+auth.json
+*.jsonl
