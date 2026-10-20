@@ -1,6 +1,7 @@
 /** Codex-inspired activity layout. Only presentation metadata is retained here. */
 import type { AgentToolResult, Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { resultWarning } from "./result-utils.ts";
 
 export type RenderContext = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 export interface Action { label: string; target: string; path?: boolean }
@@ -15,7 +16,7 @@ interface Activity {
   summary: () => string;
   status: "pending" | "done" | "error";
   images: boolean;
-  warning: boolean;
+  warning: string;
 }
 interface Plan {
   ids: string[];
@@ -41,6 +42,7 @@ const verbs: Record<string, [string, string]> = {
   get_search_content: ["Read", "Reading"], source_check: ["Checked", "Checking"],
   lens_diagnostics: ["Checked", "Checking"], lsp_navigation: ["Inspected", "Inspecting"],
   effective_config: ["Inspected", "Inspecting"], tool_search: ["Loaded", "Loading"],
+  get_goal: ["Read goal", "Reading goal"],
   web_enable: ["Enabled", "Enabling"], pi_lens_activate_tools: ["Enabled", "Enabling"],
 };
 const readOnlyLsp = new Set(["definition", "typeDefinition", "declaration", "references", "hover", "signatureHelp",
@@ -157,7 +159,7 @@ export class CodexView {
     let row = this.rows.get(context.toolCallId);
     const changed = !row || (row.status !== status && (row.status === "pending" || !context.isPartial));
     if (!row) {
-      row = { id: context.toolCallId, name, args, action, summary, status, images: false, warning: false, invalidators: new Map() };
+      row = { id: context.toolCallId, name, args, action, summary, status, images: false, warning: "", invalidators: new Map() };
       this.rows.set(row.id, row);
     } else if (row.status === "pending" || !context.isPartial) {
       // Rebuilding/exporting a finished call must not downgrade it to "Reading" again.
@@ -173,7 +175,7 @@ export class CodexView {
     // Static HTML exports use separate render states and no-op invalidators. Do not retain them.
     if (detached) row.invalidators.delete(context.state);
     const images = result.content.some((block) => block.type === "image");
-    const warning = object(object(result.details).truncation).truncated === true;
+    const warning = resultWarning(row.name, result.details);
     const finished = row.status === "pending" && !context.isPartial;
     if (row.images !== images || row.warning !== warning || finished) {
       row.images = images;
@@ -250,7 +252,7 @@ export class CodexView {
         const action = describe(row);
         const summary = row.summary();
         const diff = row.name === "edit" ? summary.match(/^\+\d+ \/ -\d+/)?.[0].replace(" / ", " ") : undefined;
-        const suffix = diff ? ` (${diff})` : row.warning ? " (truncated)" : "";
+        const suffix = [diff, row.warning].filter(Boolean).map((item) => ` (${item})`).join("");
         let first = line(theme, width, pad + (row.status === "pending" ? "◦ " : "• "), action.verb, action.target, action.path, suffix);
         if (row.status !== "error") return [first];
         first = first.replace(theme.fg("dim", pad + "• "), theme.fg("error", pad + "• "));

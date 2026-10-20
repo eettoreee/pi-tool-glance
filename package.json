@@ -1,7 +1,7 @@
 {
   "name": "pi-tool-glance",
-  "version": "0.1.0",
-  "description": "Compact, Codex-style, and full tool views for Pi, with three-way Ctrl+O switching.",
+  "version": "0.2.0",
+  "description": "Compact, Codex-style, and full tool views for Pi, selected or cycled with /toolview.",
   "type": "module",
   "license": "MIT",
   "author": "eettoreee",
@@ -17,12 +17,13 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "files": ["extensions/", "examples/", "README.md", "LICENSE"],
+  "files": ["extensions/", "examples/", "README.md", "CHANGELOG.md", "LICENSE"],
   "pi": {
     "extensions": ["./extensions/tool-glance/index.ts"]
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
