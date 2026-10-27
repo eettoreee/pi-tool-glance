@@ -31,13 +31,14 @@ async function harness(t, mode = 'tui') {
   const loaded = await loadExtensions([join(agentDir, 'extensions', 'tool-glance', 'index.ts')], process.cwd());
   assert.deepEqual(loaded.errors, []);
   const state = {
-    expanded: false, components: [], errors: [], notifications: [],
+    expanded: false, components: [], errors: [], notifications: [], thinkingLabels: [],
     statuses: new Map([['tool-glance', 'View: Old'], ['other', 'keep']]),
   };
   const ui = {
     getToolsExpanded: () => state.expanded,
     setToolsExpanded: (value) => { state.expanded = value; state.components.forEach((c) => c.setExpanded(value)); },
     setStatus: (key, value) => value === undefined ? state.statuses.delete(key) : state.statuses.set(key, value),
+    setHiddenThinkingLabel: (label) => state.thinkingLabels.push(label),
     notify: (text, level) => state.notifications.push({ text, level }),
     requestRender() {},
   };
@@ -513,4 +514,18 @@ test('the activity pulse stops when work finishes or the session resets', async 
   assert.equal(active.size, 1);
   await h.runner.emit({ type: 'session_shutdown' });
   assert.equal(active.size, 0);
+});
+
+test('drops the hidden-thinking placeholder and restores it on shutdown', async (t) => {
+  const h = await harness(t);
+  assert.deepEqual(h.state.thinkingLabels, ['']);
+  await h.runner.emit({ type: 'session_shutdown' });
+  assert.deepEqual(h.state.thinkingLabels, ['', undefined]);
+});
+
+test('non-TUI modes leave the thinking label untouched', async (t) => {
+  for (const mode of ['print', 'json', 'rpc']) {
+    const h = await harness(t, mode);
+    assert.deepEqual(h.state.thinkingLabels, []);
+  }
 });

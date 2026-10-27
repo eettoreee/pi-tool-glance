@@ -363,6 +363,9 @@ export default function toolGlance(pi: ExtensionAPI) {
     if (ctx.mode !== "tui") return;
     clearNativePending();
     ctx.ui.setStatus("tool-glance", undefined);
+    // A hidden thinking block still renders one placeholder line per model step. With thinking
+    // hidden that line is pure noise, so drop it until the session ends.
+    ctx.ui.setHiddenThinkingLabel("");
     view.reset(ctx.sessionManager.getBranch(), () => ctx.ui.getToolsExpanded());
     applyMode(appearance, ctx);
   });
@@ -377,7 +380,10 @@ export default function toolGlance(pi: ExtensionAPI) {
   pi.on("session_shutdown", (_event, ctx) => {
     clearNativePending();
     view.reset();
-    if (ctx.mode === "tui") ctx.ui.setStatus("tool-glance", undefined);
+    if (ctx.mode === "tui") {
+      ctx.ui.setStatus("tool-glance", undefined);
+      ctx.ui.setHiddenThinkingLabel(undefined);
+    }
   });
 
   pi.registerCommand("toolview", {

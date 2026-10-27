@@ -94,6 +94,10 @@ Grouping covers reads, searches, listings, inspections, and shell commands. A ru
 
 Compound and multi-line shell commands show their own bounded command text instead of a generic `shell script` label, so a collapsed group stays readable. The extension does not guess what a script accomplished or claim that tests passed merely because a test command ran.
 
+### Thinking
+
+With Pi's **Hide thinking** setting enabled (`hideThinkingBlock: true`), Pi draws a `Thinking...` placeholder for every model step. Tool Glance removes that placeholder, so a long turn does not collect one faint line per step; the working indicator still shows while the model reasons. Turn *Hide thinking* off in `/settings` to read reasoning in full. While thinking stays hidden, the placeholder is no longer clickable to expand a single block.
+
 ## Data and privacy
 
 Tool Glance changes **rendering only**. It does not re-register tools, alter execution, modify tool arguments/results, or add model context. Native renderers are retained for Full view, including their existing limitations. Their pending display resources are finalized on completion or session reset, even after switching to a compact view. HTML exports use neutral call headings, retain expandable original results, and do not change live tool progress.

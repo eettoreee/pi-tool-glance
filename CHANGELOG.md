@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- Remove the `Thinking...` placeholder Pi prints for every hidden thinking block; a long turn no longer collects one faint line per model step. The default label is restored on shutdown, and non-TUI modes are untouched.
+
 ## 0.3.0
 
 - Match Codex's activity markers from `codex-rs` 0.164: a brightness pulse with true color (Codex's `•`/`◦` blink without it) while a call runs, a green bullet on success, and a red bullet on failure.
