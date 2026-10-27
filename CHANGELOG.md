@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0
+
+- Revert the 0.4.0 hidden-thinking label change. An empty label does not remove the row on Pi 1.4.0: theme ANSI codes keep `Text` non-empty, so it rendered blank rows instead of `Thinking...`, and Pi still added its spacer. The extension no longer touches thinking rendering; Pi's default label stays.
+
 ## 0.4.0
 
 - Remove the `Thinking...` placeholder Pi prints for every hidden thinking block; a long turn no longer collects one faint line per model step. The default label is restored on shutdown, and non-TUI modes are untouched.

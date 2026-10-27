@@ -1,6 +1,6 @@
 {
   "name": "pi-tool-glance",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Compact, Codex-style, and full tool views for Pi, selected or cycled with /toolview.",
   "type": "module",
   "license": "MIT",
