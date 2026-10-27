@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Match Codex's activity markers from `codex-rs` 0.164: a brightness pulse with true color (Codex's `•`/`◦` blink without it) while a call runs, a green bullet on success, and a red bullet on failure.
+- Use bold default-color verbs, accent-colored detail labels, and Codex's detail gutter (`└` on the first line, four-space alignment after).
+- Merge shell commands into activities, and let a run span the assistant messages of one turn; user messages, prose, mutations, unknown tools, and failed/warned/image results still close it.
+- Keep running calls visible until they finish instead of hiding them inside a group.
+- Show bounded real command text for compound and multi-line shell commands instead of a generic `shell script` label.
+- Add regression coverage for marker timing and timer cleanup, cross-message runs, command bursts, barriers, and mixed-kind headers.
+
 ## 0.2.0
 
 - Use `/toolview` to select or cycle Compact, Codex, and Full. The extension no longer registers `Ctrl+O` or publishes a persistent View footer status; Pi's tree shortcut remains available.

@@ -1,12 +1,12 @@
 /** Codex-inspired activity layout. Only presentation metadata is retained here. */
 import type { AgentToolResult, Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
-import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { mixColors, sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { resultWarning } from "./result-utils.ts";
 
 export type RenderContext = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 export interface Action { label: string; target: string; path?: boolean }
 type Args = Record<string, unknown>;
-type Kind = "read" | "search" | "list" | "inspect";
+type Kind = "read" | "search" | "list" | "inspect" | "run";
 interface Activity {
   id: string;
   name: string;
@@ -29,6 +29,7 @@ const kinds: Record<string, Kind> = {
   grep: "search", find: "search", symbol_search: "search", ast_grep_search: "search", web_search: "search",
   ls: "list", project_report: "inspect", lsp_navigation: "inspect", fetch_content: "inspect",
   get_search_content: "inspect", source_check: "inspect", effective_config: "inspect",
+  bash: "run", powershell: "run",
 };
 const verbs: Record<string, [string, string]> = {
   read: ["Read", "Reading"], read_symbol: ["Read", "Reading"], read_enclosing: ["Read", "Reading"],
@@ -62,7 +63,10 @@ function eligible(name: string, args: Args): boolean {
 function shellLabel(name: string, args: Args): string {
   const raw = typeof args.command === "string" ? stripTerminalSequences(args.command.slice(0, 4096)).trim() : "";
   const fallback = name === "powershell" ? "PowerShell script" : "shell script";
-  if (!raw || /[\r\n;|&`]|^[$({]/.test(raw)) return fallback;
+  if (!raw) return fallback;
+  // Compound and multi-line commands keep their real text; a generic label would hide what ran
+  // in both the row and a collapsed command group.
+  if (/[\r\n;|&`]|^[$({]/.test(raw)) return truncateToWidth(clean(raw), 96, "…");
   const tokens = clean(raw).split(" ");
   if (!/^[\w./\\:-]+$/.test(tokens[0])) return fallback;
   const command = tokens[0].replace(/\\/g, "/").split("/").pop() ?? tokens[0];
@@ -99,13 +103,32 @@ function fitTarget(value: string, width: number, path = false): string {
   return truncateToWidth(value, width, "…");
 }
 
-function line(theme: Theme, width: number, prefix: string, verb: string, target = "", path = false, suffix = ""): string {
+const FRAME_MS = 100;
+const PULSE_MS = 2000;
+
+/** Codex's activity indicator: a brightness pulse in true color, else its 600ms bullet blink. */
+function activityMarker(theme: Theme, at = Date.now()): string {
+  if (theme.getColorMode() === "truecolor") {
+    const phase = (at % PULSE_MS) / PULSE_MS * 2 * Math.PI;
+    const intensity = 0.5 + 0.5 * Math.cos(phase);
+    return theme.style("•", { fg: mixColors(theme.colors.dim, theme.colors.text, intensity), bold: true });
+  }
+  return at % 1200 < 600 ? theme.bold("•") : theme.fg("dim", "◦");
+}
+
+/** Green means the call finished, red means it failed; running calls pulse like Codex. */
+function statusMarker(theme: Theme, status: Activity["status"]): string {
+  if (status === "pending") return activityMarker(theme);
+  return theme.fg(status === "error" ? "error" : "success", theme.bold("•"));
+}
+
+function line(theme: Theme, width: number, prefix: string, verb: string, target = "", path = false, suffix = "", accent = false): string {
   const title = truncateToWidth(verb, Math.min(24, Math.max(0, Math.floor(width * 0.4))), "…");
-  const head = theme.fg("dim", prefix) + theme.fg("muted", theme.bold(title));
+  const head = prefix + (accent ? theme.fg("accent", title) : theme.bold(title));
   const room = Math.max(0, width - visibleWidth(head));
   const tail = truncateToWidth(suffix, room, "…");
   const body = fitTarget(target, Math.max(0, room - visibleWidth(tail) - 1), path);
-  return truncateToWidth(head + (body ? ` ${theme.fg("muted", body)}` : "") + theme.fg("dim", tail), width, "…");
+  return truncateToWidth(head + (body ? ` ${theme.fg("text", body)}` : "") + theme.fg("dim", tail), width, "…");
 }
 
 export class CodexView {
@@ -115,13 +138,20 @@ export class CodexView {
   private queued = false;
   private generation = 0;
   private expanded: () => boolean = () => false;
+  /** Tool calls of the run under construction, shared with its plan once it has two members. */
+  private run: string[] = [];
+  private runPlan?: Plan;
+  private animator?: ReturnType<typeof setInterval>;
 
   reset(branch: readonly unknown[] = [], expanded: () => boolean = () => false): void {
     this.generation++;
+    this.stopAnimation();
     this.rows.clear();
     this.plans.clear();
     this.pending.clear();
     this.queued = false;
+    this.run = [];
+    this.runPlan = undefined;
     this.expanded = expanded;
     for (const entry of branch) {
       const item = object(entry);
@@ -129,29 +159,38 @@ export class CodexView {
     }
   }
 
-  /** A group may not cross a message, visible prose, mutation, command, or unknown tool. */
+  /**
+   * A run of low-risk work spans assistant messages of one turn, so a burst of reads or commands
+   * still collapses into one activity. Visible prose, user messages, mutations, and tools outside
+   * the groupable kinds close it.
+   */
   observe(message: unknown): void {
     const msg = object(message);
+    if (msg.role === "user") return this.closeRun();
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) return;
-    let ids: string[] = [];
-    const flush = () => {
-      if (ids.length > 1) {
-        const existing = this.plans.get(ids[0]);
-        if (!existing || existing.ids.join("\0") !== ids.join("\0")) {
-          const plan: Plan = { ids, dirty: true, groups: new Map() };
-          for (const id of ids) this.plans.set(id, plan);
-          this.changed(plan);
-        }
-      }
-      ids = [];
-    };
     for (const part of msg.content) {
       const block = object(part);
-      if (block.type === "toolCall" && typeof block.id === "string" && typeof block.name === "string"
-        && eligible(block.name, object(block.arguments))) ids.push(block.id);
-      else if (block.type !== "text" || clean(block.text)) flush();
+      if (block.type === "toolCall") {
+        if (typeof block.id === "string" && typeof block.name === "string"
+          && eligible(block.name, object(block.arguments))) this.extendRun(block.id);
+        else this.closeRun();
+      } else if (block.type === "text" && clean(block.text)) this.closeRun();
     }
-    flush();
+  }
+
+  private extendRun(id: string): void {
+    if (this.run.includes(id)) return;
+    this.run.push(id);
+    if (!this.runPlan && this.run.length > 1) this.runPlan = { ids: this.run, dirty: true, groups: new Map() };
+    if (!this.runPlan) return;
+    for (const key of this.run) this.plans.set(key, this.runPlan);
+    this.runPlan.dirty = true;
+    this.changed(this.runPlan);
+  }
+
+  private closeRun(): void {
+    this.run = [];
+    this.runPlan = undefined;
   }
 
   track(name: string, args: Args, action: Action, context: RenderContext, summary: () => string): void {
@@ -167,6 +206,7 @@ export class CodexView {
     }
     row.invalidators.set(context.state, context.invalidate);
     if (changed) this.changed(this.plans.get(row.id));
+    this.animate();
   }
 
   result(context: RenderContext, result: AgentToolResult<unknown>, detached = false): void {
@@ -183,13 +223,40 @@ export class CodexView {
       if (finished) row.status = context.isError ? "error" : "done";
       this.changed(this.plans.get(row.id));
     }
+    this.animate();
   }
 
   nativeDetails(context: RenderContext): boolean {
     return context.expanded && (this.expanded() || this.members(context.toolCallId).length < 2);
   }
 
-  refresh(): void { this.schedule(this.rows.keys()); }
+  refresh(): void { this.schedule(this.rows.keys()); this.animate(); }
+
+  /** Redraw pending rows for Codex's activity pulse; the interval exists only while work runs. */
+  private animate(): void {
+    if (this.expanded() || ![...this.rows.values()].some((row) => row.status === "pending")) {
+      this.stopAnimation();
+      return;
+    }
+    if (this.animator !== undefined) return;
+    const generation = this.generation;
+    this.animator = setInterval(() => {
+      if (generation !== this.generation) return;
+      for (const row of this.rows.values()) {
+        if (row.status !== "pending") continue;
+        for (const invalidate of row.invalidators.values()) {
+          try { invalidate(); } catch { /* One activity must not stop the others from pulsing. */ }
+        }
+      }
+    }, FRAME_MS);
+    this.animator.unref?.();
+  }
+
+  private stopAnimation(): void {
+    if (this.animator === undefined) return;
+    clearInterval(this.animator);
+    this.animator = undefined;
+  }
 
   private changed(plan: Plan | undefined): void {
     if (!plan) return;
@@ -253,36 +320,42 @@ export class CodexView {
         const summary = row.summary();
         const diff = row.name === "edit" ? summary.match(/^\+\d+ \/ -\d+/)?.[0].replace(" / ", " ") : undefined;
         const suffix = [diff, row.warning].filter(Boolean).map((item) => ` (${item})`).join("");
-        let first = line(theme, width, pad + (row.status === "pending" ? "◦ " : "• "), action.verb, action.target, action.path, suffix);
+        const first = line(theme, width, pad + statusMarker(theme, row.status) + " ", action.verb,
+          action.target, action.path, suffix);
         if (row.status !== "error") return [first];
-        first = first.replace(theme.fg("dim", pad + "• "), theme.fg("error", pad + "• "));
         return [first, truncateToWidth(theme.fg("dim", pad + "  └ ") + theme.fg("error", clean(summary)), width, "…")];
       },
     };
   }
 
   private groupLines(members: Activity[], open: boolean, theme: Theme, width: number, pad: string): string[] {
-    const noun: Record<Kind, string> = { read: "read", search: "search", list: "listing", inspect: "lookup" };
+    const noun: Record<Kind, string> = { read: "read", search: "search", list: "listing", inspect: "lookup", run: "command" };
     const counts = new Map<Kind, number>();
     for (const row of members) {
       const kind = kinds[row.name];
       counts.set(kind, (counts.get(kind) ?? 0) + 1);
     }
     const countLabel = [...counts].map(([kind, count]) => `${count} ${noun[kind]}${count === 1 ? "" : kind === "search" ? "es" : "s"}`).join(" · ");
-    const result = [line(theme, width, pad + "• ", "Explored", "", false, `  ${countLabel}`)];
+    const hasRun = counts.has("run");
+    const onlyRun = hasRun && counts.size === 1;
+    // Completed commands are work, reads are exploration; a mixed run is reported as work.
+    const verb = onlyRun ? "Ran" : hasRun ? "Worked" : "Explored";
+    const result = [line(theme, width, pad + statusMarker(theme, "done") + " ", verb, "", false, `  ${countLabel}`)];
+    const kindVerbs: Record<Kind, string> = { read: "Read", search: "Search", list: "List", inspect: "Inspect", run: "Ran" };
     const entries: { verb: string; target: string; path?: boolean }[] = open
       ? members.map(describe)
       : [...counts.keys()].slice(0, 2).map((kind, index) => {
         const matching = members.filter((row) => kinds[row.name] === kind);
-        const names = matching.slice(0, 2).map((row) => describe(row).target).filter(Boolean);
-        const extra = matching.length > 2 ? ` (+${matching.length - 2})` : "";
+        const targets = [...new Set(matching.map((row) => describe(row).target).filter(Boolean))];
+        const extra = targets.length > 2 ? ` (+${targets.length - 2})` : "";
         const remaining = index === 1 && counts.size > 2 ? ` · +${counts.size - 2} types` : "";
-        return { verb: ({ read: "Read", search: "Search", list: "List", inspect: "Inspect" }[kind]),
-          target: names.join(", ") + extra + remaining };
+        return { verb: kindVerbs[kind], target: targets.slice(0, 2).join(", ") + extra + remaining };
       });
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
-      result.push(line(theme, width, pad + (i === entries.length - 1 ? "  └ " : "  ├ "), entry.verb, entry.target, entry.path));
+      // Codex's activity gutter: └ marks the first detail, the rest align beneath it.
+      result.push(line(theme, width, pad + theme.fg("dim", i === 0 ? "  └ " : "    "),
+        entry.verb, entry.target, entry.path, "", true));
     }
     return result;
   }

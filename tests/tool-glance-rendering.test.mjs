@@ -201,10 +201,10 @@ for (const event of ['session_tree', 'session_shutdown']) {
   });
 }
 
-test('default Codex rendering does not start hidden native timers', async (t) => {
+test('default Codex rendering starts only the activity pulse, never a hidden native timer', async (t) => {
   const active = trackTimers(t); const h = await harness(t);
   const c = h.tool('bash', 'hidden', { command: 'node --test' }); c.updateResult(result('working'), true);
-  assert.equal(active.size, 0); c.updateResult(result('done')); assert.equal(active.size, 0);
+  assert.equal(active.size, 1); c.updateResult(result('done')); assert.equal(active.size, 0);
 });
 
 for (const name of ['mcp__demo__inspect', 'powershell']) {
@@ -376,5 +376,141 @@ test('brief native subagent status retains image fallbacks and renderer cleanup'
   const c = h.tool('subagent', 'agent-resources', { agent: 'reviewer' }, { native });
   c.updateResult({ content: [image], details: { mode: 'single', asyncId: 'run-123', results: [] }, isError: false }, true);
   assert.match(clean(c), /running/); assert.match(clean(c), /\[Image:/); assert.doesNotMatch(clean(c), /HIDDEN_NATIVE_BODY/);
-  assert.equal(active.size, 1); await h.runner.emit({ type: 'session_shutdown' }); assert.equal(active.size, 0);
+  // The native timer and the activity pulse both run while the call is pending.
+  assert.equal(active.size, 2); await h.runner.emit({ type: 'session_shutdown' }); assert.equal(active.size, 0);
+});
+
+// v4: a run spans assistant messages of one turn and also covers shell commands.
+
+async function emitEnd(h, content, role = 'assistant') {
+  await h.runner.emit({ type: 'message_end', message: { role, content } });
+}
+const call = (id, name, args) => ({ type: 'toolCall', name, id, arguments: args });
+const prose = (text) => ({ type: 'text', text });
+
+test('v4 merges a command burst inside one message', async (t) => {
+  const h = await harness(t);
+  const calls = [
+    ['bash', 'run-1', { command: 'npm test' }],
+    ['bash', 'run-2', { command: 'uv run check.py' }],
+    ['powershell', 'run-3', { command: 'git status' }],
+    ['bash', 'run-4', { command: 'npm run build' }],
+  ];
+  await h.observe(calls);
+  const cs = calls.map(([name, id, args]) => h.tool(name, id, args));
+  cs.forEach((c) => c.updateResult(result()));
+  await Promise.resolve();
+  const header = clean(cs[0]);
+  assert.match(header, /Ran\s+4 commands/);
+  assert.match(header, /npm test, uv run/);
+  for (const c of cs.slice(1)) assert.equal(clean(c), '');
+});
+
+test('v4 merges commands across assistant messages of the same turn', async (t) => {
+  const h = await harness(t);
+  await emitEnd(h, [call('cross-1', 'bash', { command: 'npm run build' })]);
+  const first = h.tool('bash', 'cross-1', { command: 'npm run build' }); first.updateResult(result());
+  await emitEnd(h, [call('cross-2', 'bash', { command: 'npm run lint' })]);
+  const second = h.tool('bash', 'cross-2', { command: 'npm run lint' }); second.updateResult(result());
+  await emitEnd(h, [call('cross-3', 'bash', { command: 'npm run test' })]);
+  const third = h.tool('bash', 'cross-3', { command: 'npm run test' }); third.updateResult(result());
+  await Promise.resolve();
+  assert.match(clean(first), /Ran\s+3 commands/);
+  assert.equal(clean(second), ''); assert.equal(clean(third), '');
+});
+
+test('v4 prose, user messages, mutations, and unknown tools close a run', async (t) => {
+  const h = await harness(t);
+  const cases = [
+    ['prose', [call('bar-1', 'bash', { command: 'npm test' })], [prose('Now I will lint.'), call('bar-2', 'bash', { command: 'npm run lint' })]],
+    ['mutation', [call('bar-3', 'bash', { command: 'npm test' })], [call('bar-4', 'edit', { path: 'a.txt' })]],
+    ['unknown', [call('bar-5', 'bash', { command: 'npm test' })], [call('bar-6', 'mcp__demo__inspect', { target: 'x' })]],
+  ];
+  for (const [label, firstCalls, secondCalls] of cases) {
+    await emitEnd(h, firstCalls);
+    const before = h.tool(firstCalls[0].name, firstCalls[0].id, firstCalls[0].arguments); before.updateResult(result());
+    await emitEnd(h, secondCalls);
+    const after = secondCalls.map((block) => {
+      const c = h.tool(block.name, block.id, block.arguments); c.updateResult(result()); return c;
+    });
+    await Promise.resolve();
+    assert.doesNotMatch(clean(before), /2 commands|Worked/, label);
+    assert.ok(after.some((c) => clean(c).trim() !== ''), label);
+    await emitEnd(h, [], 'user');
+  }
+  await emitEnd(h, [call('bar-7', 'bash', { command: 'npm test' })]);
+  const split = h.tool('bash', 'bar-7', { command: 'npm test' }); split.updateResult(result());
+  await emitEnd(h, [], 'user');
+  await emitEnd(h, [call('bar-8', 'bash', { command: 'npm run lint' })]);
+  const nextTurn = h.tool('bash', 'bar-8', { command: 'npm run lint' }); nextTurn.updateResult(result());
+  await Promise.resolve();
+  assert.match(clean(split), /Ran npm test/); assert.match(clean(nextTurn), /Ran npm run lint/);
+});
+
+test('v4 running calls stay visible, merge once done, and errors split out', async (t) => {
+  const h = await harness(t);
+  await h.observe([['bash', 'live-1', { command: 'npm test' }], ['bash', 'live-2', { command: 'npm run build' }]]);
+  const first = h.tool('bash', 'live-1', { command: 'npm test' });
+  const second = h.tool('bash', 'live-2', { command: 'npm run build' });
+  first.updateResult(result('working'), true); second.updateResult(result('working'), true);
+  await Promise.resolve();
+  assert.match(clean(first), /Running npm test/); assert.match(clean(second), /Running npm run build/);
+  first.updateResult(result()); second.updateResult(result());
+  await Promise.resolve();
+  assert.match(clean(first), /Ran\s+2 commands/); assert.equal(clean(second), '');
+  await emitEnd(h, [], 'user');
+  await h.observe([['bash', 'err-1', { command: 'npm test' }], ['bash', 'err-2', { command: 'npm run build' }]]);
+  const ok = h.tool('bash', 'err-1', { command: 'npm test' });
+  const bad = h.tool('bash', 'err-2', { command: 'npm run build' });
+  ok.updateResult(result()); bad.updateResult({ ...result('BUILD_FAILED'), isError: true });
+  await Promise.resolve();
+  assert.match(clean(ok), /Ran npm test/); assert.doesNotMatch(clean(ok), /2 commands/);
+  assert.match(clean(bad), /BUILD_FAILED/);
+});
+
+test('v4 mixed exploration and commands are reported as work', async (t) => {
+  const h = await harness(t);
+  await h.observe([['read', 'mix-1', { path: 'a.txt' }], ['bash', 'mix-2', { command: 'npm test' }], ['grep', 'mix-3', { pattern: 'needle', path: 'src' }]]);
+  const cs = [['read', 'mix-1', { path: 'a.txt' }], ['bash', 'mix-2', { command: 'npm test' }], ['grep', 'mix-3', { pattern: 'needle', path: 'src' }]]
+    .map(([name, id, args]) => h.tool(name, id, args));
+  cs.forEach((c) => c.updateResult(result()));
+  await Promise.resolve();
+  const header = clean(cs[0]);
+  assert.match(header, /Worked\s+1 read/); assert.match(header, /1 command/); assert.match(header, /1 search/);
+  assert.ok(cs.slice(1).every((c) => clean(c) === ''));
+});
+
+// Codex fidelity: pulsing activity marker, green success, red failure.
+
+test('codex markers pulse while running and settle green or red', async (t) => {
+  const h = await harness(t); const theme = themeModule.theme;
+  const c = h.tool('bash', 'pulse', { command: 'npm test' });
+  const now = Date.now; t.after(() => { Date.now = now; });
+  Date.now = () => 0;
+  const bright = c.render(80).join('\n');
+  Date.now = () => 1000;
+  const faint = c.render(80).join('\n');
+  assert.notEqual(bright, faint); // True color pulses brightness; 256 color blinks •/◦.
+  const glyph = tui.stripTerminalSequences(faint).trim().slice(0, 1);
+  assert.ok(glyph === '•' || glyph === '◦', glyph);
+  c.updateResult(result());
+  assert.ok(c.render(80).join('\n').includes(theme.fg('success', theme.bold('•'))));
+  const bad = h.tool('bash', 'fails', { command: 'npm run build' });
+  bad.updateResult({ ...result('BUILD_FAILED'), isError: true });
+  assert.ok(bad.render(80).join('\n').includes(theme.fg('error', theme.bold('•'))));
+});
+
+test('the activity pulse stops when work finishes or the session resets', async (t) => {
+  const active = trackTimers(t); const h = await harness(t);
+  const c = h.tool('bash', 'pulse-timer', { command: 'npm test' });
+  c.render(80);
+  assert.equal(active.size, 1);
+  c.updateResult(result());
+  await Promise.resolve();
+  assert.equal(active.size, 0);
+  const pending = h.tool('bash', 'pulse-reset', { command: 'npm test' });
+  pending.render(80);
+  assert.equal(active.size, 1);
+  await h.runner.emit({ type: 'session_shutdown' });
+  assert.equal(active.size, 0);
 });
